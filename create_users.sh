@@ -6,85 +6,84 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# Log file
+# Log file path
 LOG_FILE="/var/log/user_management.log"
-# Password file
+# Password storage file path
 PASSWORD_FILE="/var/secure/user_passwords.csv"
 
-# Ensure the secure directory exists and set appropriate permissions
+# Create secure directory for passwords if it doesn't exist
 mkdir -p /var/secure
 chmod 700 /var/secure
 
-# Check if the file argument is provided
-if [ -z "$1" ]; then
+# Function to create groups
+create_groups() {
+  local groups="$1"
+  IFS=',' read -r -a group_array <<< "$groups"
+  for group in "${group_array[@]}"; do
+    group=$(echo "$group" | xargs) # Remove leading/trailing whitespace
+    if [ ! -z "$group" ]; then
+      if ! getent group "$group" > /dev/null; then
+        groupadd "$group"
+        echo "Group '$group' created." | tee -a "$LOG_FILE"
+      fi
+    fi
+  done
+}
+
+# Function to create user and group
+create_user() {
+  local username="$1"
+  local groups="$2"
+
+  # Create user group if it doesn't exist
+  if ! getent group "$username" > /dev/null; then
+    groupadd "$username"
+    echo "Group '$username' created." | tee -a "$LOG_FILE"
+  fi
+
+  # Create the additional groups
+  create_groups "$groups"
+
+  # Create user with personal group and home directory if user doesn't exist
+  if ! id "$username" > /dev/null 2>&1; then
+    useradd -m -g "$username" -G "$groups" "$username"
+    echo "User '$username' created with groups '$groups'." | tee -a "$LOG_FILE"
+
+    # Set home directory permissions
+    chmod 700 "/home/$username"
+    chown "$username:$username" "/home/$username"
+
+    # Generate random password
+    password=$(openssl rand -base64 12)
+    echo "$username:$password" | chpasswd
+    echo "$username,$password" >> "$PASSWORD_FILE"
+  else
+    echo "User '$username' already exists." | tee -a "$LOG_FILE"
+  fi
+}
+
+# Read the input file
+input_file="$1"
+if [ -z "$input_file" ]; then
   echo "Usage: $0 <name-of-text-file>"
   exit 1
 fi
 
-# Check if the input file exists
-if [ ! -f "$1" ]; then
-  echo "File $1 does not exist."
+# Ensure the input file exists
+if [ ! -f "$input_file" ]; then
+  echo "File '$input_file' not found!"
   exit 1
 fi
 
-# Function to generate a random password
-generate_password() {
-  < /dev/urandom tr -dc 'A-Za-z0-9!@#$%^&*()-_=+' | head -c 12
-}
-
-# Function to log actions
-log_action() {
-  echo "$(date +'%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
-}
-
-# Read the input file and process each line
-while IFS=';' read -r username groups; do
-  username=$(echo "$username" | xargs)
-  groups=$(echo "$groups" | xargs) 
-
-  if id "$username" &>/dev/null; then
-    log_action "User $username already exists."
-    continue
+# Process each line of the input file
+while IFS=';' read -r user groups; do
+  user=$(echo "$user" | xargs) # Remove leading/trailing whitespace
+  groups=$(echo "$groups" | xargs) # Remove leading/trailing whitespace
+  if [ ! -z "$user" ]; then
+    create_user "$user" "$groups"
   fi
+done < "$input_file"
 
-  # Create the user with a home directory
-  useradd -m "$username"
-  if [ $? -eq 0 ]; then
-    log_action "User $username created successfully."
-  else
-    log_action "Failed to create user $username."
-    continue
-  fi
-
-  # Set the user's primary group to their own username
-  usermod -g "$username" "$username"
-
-  # Assign additional groups
-  if [ -n "$groups" ]; then
-    IFS=',' read -ra ADDR <<< "$groups"
-    for group in "${ADDR[@]}"; do
-      group=$(echo "$group" | xargs) # Trim whitespaces
-      if ! getent group "$group" >/dev/null; then
-        groupadd "$group"
-        log_action "Group $group created."
-      fi
-      usermod -aG "$group" "$username"
-      log_action "User $username added to group $group."
-    done
-  fi
-
-  # Generate a password
-  password=$(generate_password)
-  echo "$username:$password" | chpasswd
-  log_action "Password for user $username set."
-
-  # Store the password in the secure file
-  echo "$username,$password" >> "$PASSWORD_FILE"
-done < "$1"
-
-# Set the appropriate permissions for the password file
+# Set permissions for password file
 chmod 600 "$PASSWORD_FILE"
-
-log_action "Script execution completed."
-
-echo "User creation process completed. Check $LOG_FILE for details."
+echo "User creation process completed." | tee -a "$LOG_FILE"
